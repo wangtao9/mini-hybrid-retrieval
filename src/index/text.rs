@@ -1,27 +1,55 @@
+use crate::index::fst::{Fst, FstBuilder};
+use crate::index::wand::{wand_search, Posting, WandResult};
 use crate::types::{Document, Query, Search, SearchSource, SearchResult};
 use std::collections::HashMap;
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
 
-#[derive(Debug, Clone)]
-pub struct Posting {
-    pub doc_id: String,
-    pub tf: usize,
-    pub positions: Vec<usize>,
+/// Bidirectional String ↔ u32 mapping for WAND-compatible doc IDs.
+struct DocIdMap {
+    to_internal: HashMap<String, u32>,
+    to_external: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PostingList {
-    pub entries: Vec<Posting>,
+impl DocIdMap {
+    fn new() -> Self {
+        DocIdMap {
+            to_internal: HashMap::new(),
+            to_external: Vec::new(),
+        }
+    }
+
+    fn get_or_insert(&mut self, external: &str) -> u32 {
+        if let Some(&id) = self.to_internal.get(external) {
+            return id;
+        }
+        let id = self.to_external.len() as u32;
+        self.to_external.push(external.to_string());
+        self.to_internal.insert(external.to_string(), id);
+        id
+    }
+
+    fn to_external(&self, id: u32) -> &str {
+        &self.to_external[id as usize]
+    }
+}
+
+struct PostingList {
+    entries: Vec<Posting>,
 }
 
 pub struct TextIndex {
-    inverted: HashMap<String, PostingList>,
-    doc_lengths: HashMap<String, usize>,
+    fst: Fst,
+    posting_lists: Vec<PostingList>,
+    #[allow(dead_code)]
+    term_strings: Vec<String>,
+    term_upper_bounds: Vec<f32>,
+    doc_id_map: DocIdMap,
+    doc_lengths: Vec<f32>,
     avg_dl: f32,
     doc_count: usize,
-    doc_texts: HashMap<String, String>,
+    doc_texts: Vec<String>,
 }
 
 pub fn tokenize(text: &str) -> Vec<String> {
@@ -35,33 +63,32 @@ pub fn tokenize(text: &str) -> Vec<String> {
 impl TextIndex {
     pub fn new(docs: Vec<Document>) -> Self {
         let doc_count = docs.len();
-        let mut inverted: HashMap<String, PostingList> = HashMap::new();
-        let mut doc_lengths: HashMap<String, usize> = HashMap::new();
-        let mut doc_texts: HashMap<String, String> = HashMap::new();
+        let mut doc_id_map = DocIdMap::new();
+        let mut doc_lengths: Vec<f32> = vec![0.0; doc_count];
+        let mut doc_texts: Vec<String> = Vec::with_capacity(doc_count);
+
+        // term -> (internal_doc_id, tf) pairs
+        let mut term_postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
 
         let mut total_length: usize = 0;
 
         for doc in &docs {
+            let internal_id = doc_id_map.get_or_insert(&doc.id);
             let tokens = tokenize(&doc.text);
-            doc_lengths.insert(doc.id.clone(), tokens.len());
+            doc_lengths[internal_id as usize] = tokens.len() as f32;
             total_length += tokens.len();
-            doc_texts.insert(doc.id.clone(), doc.text.clone());
+            doc_texts.push(doc.text.clone());
 
-            for (pos, token) in tokens.iter().enumerate() {
-                let list = inverted.entry(token.clone()).or_insert_with(|| PostingList {
-                    entries: Vec::new(),
-                });
-
-                if let Some(entry) = list.entries.iter_mut().find(|e| e.doc_id == doc.id) {
-                    entry.tf += 1;
-                    entry.positions.push(pos);
-                } else {
-                    list.entries.push(Posting {
-                        doc_id: doc.id.clone(),
-                        tf: 1,
-                        positions: vec![pos],
-                    });
-                }
+            // Count tf per term for this doc
+            let mut term_counts: HashMap<String, u32> = HashMap::new();
+            for token in &tokens {
+                *term_counts.entry(token.clone()).or_insert(0) += 1;
+            }
+            for (term, tf) in term_counts {
+                term_postings
+                    .entry(term)
+                    .or_default()
+                    .push((internal_id, tf));
             }
         }
 
@@ -71,8 +98,56 @@ impl TextIndex {
             0.0
         };
 
+        // Sort terms lexicographically, build posting lists and FST
+        let mut sorted_terms: Vec<String> = term_postings.keys().cloned().collect();
+        sorted_terms.sort();
+
+        let n = doc_count as f32;
+        let mut posting_lists: Vec<PostingList> = Vec::with_capacity(sorted_terms.len());
+        let mut term_upper_bounds: Vec<f32> = Vec::with_capacity(sorted_terms.len());
+        let mut fst_builder = FstBuilder::new();
+
+        for (idx, term) in sorted_terms.iter().enumerate() {
+            let mut entries = term_postings.remove(term).unwrap();
+            // Sort by doc_id for WAND
+            entries.sort_by_key(|(doc_id, _)| *doc_id);
+
+            let df = entries.len() as f32;
+            let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+
+            // Upper bound: max possible BM25 score for this term (tf at max, shortest doc)
+            let max_tf = entries.iter().map(|(_, tf)| *tf).max().unwrap_or(0) as f32;
+            let min_dl = doc_lengths
+                .iter()
+                .copied()
+                .filter(|&l| l > 0.0)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(1.0);
+            let max_tf_norm = if avg_dl > 0.0 {
+                (max_tf * (K1 + 1.0)) / (max_tf + K1 * (1.0 - B + B * min_dl / avg_dl))
+            } else {
+                0.0
+            };
+            let upper_bound = idf * max_tf_norm;
+
+            posting_lists.push(PostingList {
+                entries: entries
+                    .into_iter()
+                    .map(|(doc_id, tf)| Posting { doc_id, tf })
+                    .collect(),
+            });
+            term_upper_bounds.push(upper_bound);
+            fst_builder.insert(term.as_bytes(), idx as u64);
+        }
+
+        let fst = fst_builder.build();
+
         TextIndex {
-            inverted,
+            fst,
+            posting_lists,
+            term_strings: sorted_terms,
+            term_upper_bounds,
+            doc_id_map,
             doc_lengths,
             avg_dl,
             doc_count,
@@ -80,17 +155,29 @@ impl TextIndex {
         }
     }
 
-    pub fn bm25_score(&self, tf: usize, df: usize, dl: usize) -> f32 {
-        let n = self.doc_count as f32;
-        let df_f = df as f32;
-        let tf_f = tf as f32;
-        let dl_f = dl as f32;
-
-        let idf = (1.0 + (n - df_f + 0.5) / (df_f + 0.5)).ln();
-        let tf_norm = (tf_f * (K1 + 1.0))
-            / (tf_f + K1 * (1.0 - B + B * dl_f / self.avg_dl));
-
-        idf * tf_norm
+    /// Collect posting list indices for query tokens using FST exact and prefix lookup.
+    fn resolve_terms(&self, tokens: &[String]) -> Vec<usize> {
+        let mut indices: Vec<usize> = Vec::new();
+        for token in tokens {
+            // Exact match
+            if let Some(idx) = self.fst.get(token.as_bytes()) {
+                let i = idx as usize;
+                if i < self.posting_lists.len() && !self.posting_lists[i].entries.is_empty() {
+                    indices.push(i);
+                }
+            } else {
+                // Prefix expansion: find all terms starting with this token
+                for (_key, idx) in self.fst.prefix_search(token.as_bytes()) {
+                    let i = idx as usize;
+                    if i < self.posting_lists.len() && !self.posting_lists[i].entries.is_empty() {
+                        indices.push(i);
+                    }
+                }
+            }
+        }
+        indices.sort();
+        indices.dedup();
+        indices
     }
 }
 
@@ -107,36 +194,44 @@ impl Search for TextIndex {
             return vec![];
         }
 
-        let mut scores: HashMap<String, f32> = HashMap::new();
-        let mut match_positions: HashMap<String, Vec<usize>> = HashMap::new();
-
-        for token in &tokens {
-            if let Some(list) = self.inverted.get(token) {
-                let df = list.entries.len();
-                for entry in &list.entries {
-                    let dl = *self.doc_lengths.get(&entry.doc_id).unwrap_or(&0);
-                    let score = self.bm25_score(entry.tf, df, dl);
-                    *scores.entry(entry.doc_id.clone()).or_insert(0.0) += score;
-
-                    let positions = match_positions.entry(entry.doc_id.clone()).or_default();
-                    positions.extend(&entry.positions);
-                }
-            }
+        let term_indices = self.resolve_terms(&tokens);
+        if term_indices.is_empty() {
+            return vec![];
         }
 
-        let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Collect posting lists and IDFs for WAND
+        let n = self.doc_count as f32;
+        let posting_lists: Vec<Vec<Posting>> = term_indices
+            .iter()
+            .map(|&i| self.posting_lists[i].entries.clone())
+            .collect();
+        let upper_bounds: Vec<f32> = term_indices.iter().map(|&i| self.term_upper_bounds[i]).collect();
+        let idf_values: Vec<f32> = term_indices
+            .iter()
+            .map(|&i| {
+                let df = self.posting_lists[i].entries.len() as f32;
+                (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+            })
+            .collect();
 
-        ranked
+        let wand_results: Vec<WandResult> = wand_search(
+            &posting_lists,
+            &upper_bounds,
+            &idf_values,
+            &self.doc_lengths,
+            self.avg_dl,
+            top_k,
+        );
+
+        wand_results
             .into_iter()
-            .take(top_k)
-            .map(|(doc_id, score)| {
-                let text = self.doc_texts.get(&doc_id).unwrap();
-                let positions = match_positions.get(&doc_id);
-                let snippet = make_snippet(text, positions);
+            .map(|r| {
+                let external_id = self.doc_id_map.to_external(r.doc_id).to_string();
+                let text = &self.doc_texts[r.doc_id as usize];
+                let snippet = make_snippet(text, None);
                 SearchResult {
-                    id: doc_id,
-                    score,
+                    id: external_id,
+                    score: r.score,
                     source: SearchSource::Text,
                     snippet,
                 }
@@ -151,7 +246,6 @@ pub fn make_snippet(text: &str, positions: Option<&Vec<usize>>) -> String {
         if pos.is_empty() {
             0
         } else {
-            // Find the first matching token position, back up a bit for context
             let first = pos.iter().min().copied().unwrap_or(0);
             first.saturating_sub(3)
         }
@@ -225,7 +319,6 @@ mod tests {
         let results = index.search(&Query::Text("rust programming".into()), 2);
 
         assert_eq!(results.len(), 2);
-        // Both d1 and d3 contain both query terms; d3 is shorter and more focused
         let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"d3"), "d3 should be in top results");
         assert_eq!(results[0].source, SearchSource::Text);
@@ -268,5 +361,26 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "d1", "doc with higher tf should score higher");
         assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn test_prefix_search() {
+        let docs = vec![
+            Document {
+                id: "d1".into(),
+                text: "Rust programming language".into(),
+                vector: vec![],
+            },
+            Document {
+                id: "d2".into(),
+                text: "Ruby programming language".into(),
+                vector: vec![],
+            },
+        ];
+
+        let index = TextIndex::new(docs);
+        // "ru" should prefix-expand to "rust" and "ruby"
+        let results = index.search(&Query::Text("ru".into()), 5);
+        assert_eq!(results.len(), 2, "prefix search should match both docs");
     }
 }
