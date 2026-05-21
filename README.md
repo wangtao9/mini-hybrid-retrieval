@@ -31,6 +31,20 @@ cargo run -- index --docs data/documents.json --triples data/triples.json --enti
 cargo run -- index --docs data/documents.json --triples data/triples.json --entity-docs data/entity_docs.json hybrid --query "systems programming" --query-vector "0.9,0.1,0.0,0.0" --entity "Rust" --top-k 3
 ```
 
+## Release(CLI)
+```bash
+# 编译 release 版本
+cargo build --release
+
+# 直接运行CLI
+./target/release/mini-hybrid-retrieval index \
+    --docs data/documents.json \
+    --triples data/triples.json \
+    --entity-docs data/entity_docs.json \
+    text --query "rust" --top-k 3
+```
+
+
 ## Data Format
 
 **documents.json** — Documents with pre-computed embeddings:
