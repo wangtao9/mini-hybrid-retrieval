@@ -1,0 +1,13 @@
+{
+  "Rust": ["doc_001", "doc_007"],
+  "C++": ["doc_003"],
+  "Python": ["doc_002"],
+  "JavaScript": ["doc_004"],
+  "TypeScript": ["doc_006"],
+  "Go": ["doc_005"],
+  "Java": ["doc_008"],
+  "Kotlin": ["doc_012"],
+  "Swift": ["doc_011"],
+  "Haskell": ["doc_009"],
+  "C": ["doc_010"]
+}

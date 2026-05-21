@@ -1,0 +1,14 @@
+[
+  {"id": "doc_001", "text": "Rust is a systems programming language focused on safety and performance", "vector": [0.9, 0.1, 0.0, 0.0]},
+  {"id": "doc_002", "text": "Python is a high-level scripting language popular for data science", "vector": [0.1, 0.9, 0.0, 0.1]},
+  {"id": "doc_003", "text": "C++ is a systems language with manual memory management and high performance", "vector": [0.8, 0.0, 0.2, 0.0]},
+  {"id": "doc_004", "text": "JavaScript is the language of the web used for frontend and backend development", "vector": [0.0, 0.7, 0.0, 0.8]},
+  {"id": "doc_005", "text": "Go is a compiled language designed for simplicity and concurrency", "vector": [0.6, 0.2, 0.5, 0.0]},
+  {"id": "doc_006", "text": "TypeScript adds static typing to JavaScript for large scale applications", "vector": [0.0, 0.6, 0.1, 0.9]},
+  {"id": "doc_007", "text": "Rust ownership model prevents memory bugs without garbage collection", "vector": [0.95, 0.0, 0.0, 0.05]},
+  {"id": "doc_008", "text": "Java is a compiled language running on the JVM used in enterprise systems", "vector": [0.3, 0.5, 0.6, 0.0]},
+  {"id": "doc_009", "text": "Haskell is a purely functional programming language with strong type system", "vector": [0.5, 0.3, 0.0, 0.4]},
+  {"id": "doc_010", "text": "C is the foundational systems language that influenced many modern languages", "vector": [0.85, 0.0, 0.15, 0.0]},
+  {"id": "doc_011", "text": "Swift is Apples language for iOS and macOS development with safety features", "vector": [0.7, 0.1, 0.3, 0.1]},
+  {"id": "doc_012", "text": "Kotlin is a modern language on the JVM used for Android development", "vector": [0.2, 0.5, 0.5, 0.1]}
+]
