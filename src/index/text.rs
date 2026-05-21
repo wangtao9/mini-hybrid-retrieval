@@ -153,7 +153,7 @@ pub fn make_snippet(text: &str, positions: Option<&Vec<usize>>) -> String {
         } else {
             // Find the first matching token position, back up a bit for context
             let first = pos.iter().min().copied().unwrap_or(0);
-            if first > 3 { first - 3 } else { 0 }
+            first.saturating_sub(3)
         }
     } else {
         0

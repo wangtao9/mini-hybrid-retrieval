@@ -68,8 +68,7 @@ impl Search for GraphIndex {
                         self.incoming
                             .get(&current)
                             .cloned()
-                            .unwrap_or_default()
-                            .into_iter(),
+                            .unwrap_or_default(),
                     )
                     .collect();
 
